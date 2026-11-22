@@ -56,9 +56,11 @@ function paintErr() { var el = $("err"); if (el) el.textContent = S.err; }
 function poll() {
   if (S.busy) return;
   S.busy = true;
-  var t0 = Date.now();
+  var t0 = Date.now(), pidUsed = S.pid, pinUsed = S.pin;
   call("getState", [S.pid, S.since, S.pin]).then(function (st) {
     S.busy = false;
+    // Sent before joining or entering the PIN: stale, ignore it.
+    if (pidUsed !== S.pid || pinUsed !== S.pin) return;
     S.offset = st.now - (t0 + Date.now()) / 2;
     if (st.chat && st.chat.length) addChat(st.chat);
     S.st = st;
