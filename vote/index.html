@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Book of the Year</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📚</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Inter:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="../styles.css">
+<style>
+/* Ballot: one card per book, "Didn't read" by default, a 5x2 grid of scores. */
+.book h3 { font-family: var(--display); font-size: 1.15rem; font-weight: 800; margin: 0; letter-spacing: -0.01em; }
+.book .by { color: var(--foil-dim); font-size: 0.9rem; margin: 2px 0 12px; }
+.scores { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+.scores button, .notread { min-height: 44px; border-radius: 10px; background: rgba(0,0,0,0.25); color: var(--foil); font-weight: 600; font-variant-numeric: tabular-nums; border: 2px solid transparent; }
+.notread { width: 100%; margin-top: 6px; font-weight: 500; color: var(--foil-dim); }
+.scores button[aria-pressed=true] { background: var(--queso); color: #2b2210; }
+.notread[aria-pressed=true] { border-color: var(--line); color: var(--foil); }
+.book.scored { border-color: rgba(242,185,59,0.5); }
+.submitbar { position: sticky; bottom: calc(env(safe-area-inset-bottom, 0px) + 12px); z-index: 4; display: flex; flex-direction: column; gap: 6px; }
+.submitbar .btn { width: 100%; padding: 14px 16px; font-size: 1.02rem; box-shadow: 0 8px 24px rgba(0,0,0,0.35); }
+.res { display: grid; grid-template-columns: 3ch 1fr auto; gap: 12px; align-items: center; }
+.res .rk { font-family: var(--display); font-weight: 800; font-size: 1.4rem; color: var(--foil-dim); }
+.res .sc { font-family: var(--display); font-weight: 800; font-size: 1.6rem; font-variant-numeric: tabular-nums; text-align: right; }
+.res .meta { color: var(--foil-dim); font-size: 0.85rem; }
+.res.win { background: linear-gradient(var(--queso), #c98f1d); color: #2b2210; border: 0; }
+.res.win .rk, .res.win .meta { color: #2b2210; }
+.res.fresh { animation: pop 500ms ease-out; }
+@keyframes pop { from { transform: scale(0.92); opacity: 0; } to { transform: none; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .res.fresh { animation: none; } }
+</style>
+</head>
+<body>
+<canvas class="snow" id="snow" aria-hidden="true"></canvas>
+<main class="wrap" id="app" style="padding-bottom:32px"><p class="muted">Loading the ballot...</p></main>
+<script>
+var API_URL = "https://script.google.com/macros/s/AKfycbx_yZWmk_b-MYy_9-gptHiBzdnW2i3_2SqgBEyI2tNvngBYoPy-eTIE7tdmWvzJ1uF0cQ/exec";
+
+// Shares names, PIN and device id with the quiz page (same site, same keys).
+function ls(k, v) {
+  try { if (v === undefined) return localStorage.getItem("bbq_" + k); if (v === null) localStorage.removeItem("bbq_" + k); else localStorage.setItem("bbq_" + k, v); } catch (e) { return null; }
+}
+function newId() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36); }
+var S = { vid: ls("vid") || "", pin: ls("pin") || "", st: null, key: "", scores: null, name: null, dirty: false, busy: false, hostAsk: false, confirm: "", err: "", note: "", lastRevealed: 0 };
+if (!S.vid) { S.vid = newId(); ls("vid", S.vid); }
+
+function esc(t) { return String(t == null ? "" : t).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
+function $(id) { return document.getElementById(id); }
+function call(fn, args) {
+  var ctl = window.AbortController ? new AbortController() : null;
+  var t = ctl ? setTimeout(function () { ctl.abort(); }, 15000) : 0;
+  return fetch(API_URL, { method: "POST", body: JSON.stringify({ fn: fn, args: args }), signal: ctl ? ctl.signal : undefined })
+    .then(function (r) { clearTimeout(t); if (!r.ok) throw new Error("Connection problem (" + r.status + "), try again."); return r.json(); })
+    .then(function (d) { if (!d.ok) throw new Error(d.e); return d.r; }, function (e) { clearTimeout(t); throw e; });
+}
+function run(fn, args, ok, fail) {
+  call(fn, args).then(ok || function () {}, function (e) {
+    var m = (e && e.message) ? e.message : String(e);
+    if (/fetch|load failed|network|abort/i.test(m)) m = "Connection hiccup, try again.";
+    S.err = m; paintErr(); if (fail) fail(e);
+  });
+}
+function paintErr() { var el = $("err"); if (el) el.textContent = S.err; }
+
+function poll() {
+  if (S.busy) return;
+  S.busy = true;
+  var pinUsed = S.pin;
+  call("voteState", [S.vid, S.pin]).then(function (st) {
+    S.busy = false;
+    if (pinUsed !== S.pin) return;
+    if (S.pin && !st.host) { S.pin = ""; ls("pin", null); }
+    S.st = st;
+    // Start from your saved ballot, but never overwrite taps you haven't submitted.
+    if (!S.dirty) S.scores = st.mine ? JSON.parse(JSON.stringify(st.mine.scores)) : (S.scores || {});
+    render();
+  }, function () { S.busy = false; });
+}
+setInterval(poll, 3000);
+poll();
+
+function render(force) {
+  var st = S.st; if (!st) return;
+  var key = JSON.stringify([st.phase, st.revealed, st.voters, st.names, st.host, !!st.mine, st.books, S.hostAsk, S.confirm, S.scores, S.note]);
+  if (key === S.key && !force) return;
+  var a = document.activeElement;
+  if (!force && a && a.tagName === "INPUT") return; // don't rebuild under typing
+  S.key = key;
+  var html = '';
+  if (st.host) html += hostBar(st);
+  html += '<div class="title-block"><span class="ribbon">Christmas Special</span><h1>Book of the Year</h1></div>';
+  if (S.hostAsk && !st.host) html += pinView();
+  else if (st.phase === "open") html += ballotView(st);
+  else if (!st.results) html += '<div class="card result"><div class="big">Voting closed</div><p class="muted">' + st.voters + ' ballots in. Results coming up.</p></div>';
+  else html += resultsView(st);
+  html += '<p class="err" id="err" role="alert"></p>';
+  if (!st.host && !S.hostAsk) html += '<button class="link" id="hostlink" style="align-self:center">I\'m the quizmaster</button>';
+  $("app").innerHTML = html;
+  paintErr();
+  wire();
+}
+
+function ballotView(st) {
+  var sc = S.scores || {};
+  var n = Object.keys(sc).length;
+  var cards = st.books.map(function (b, i) {
+    var v = sc[b.title] || 0;
+    var nums = '';
+    for (var k = 1; k <= 10; k++) nums += '<button type="button" data-b="' + i + '" data-v="' + k + '" aria-pressed="' + (v === k) + '" aria-label="' + esc(b.title) + ': ' + k + '">' + k + '</button>';
+    return '<div class="card book' + (v ? ' scored' : '') + '"><h3>' + esc(b.title) + '</h3><p class="by">' + esc(b.author) + '</p>' +
+      '<div class="scores">' + nums + '</div><button type="button" class="notread" data-b="' + i + '" data-v="0" aria-pressed="' + (!v) + '">Didn\'t read it</button></div>';
+  }).join("");
+  var name = S.name != null ? S.name : (st.mine ? st.mine.name : (ls("name") || ""));
+  return '<p class="muted" style="margin:0">Score only the books you read, 1 (meh) to 10 (loved it). Leave the rest on "Didn\'t read it": they don\'t count against a book. ' +
+    'Each result is the average, nudged toward the group average by ' + st.prior + ' imaginary votes, so a book few people read has to be really loved to win.</p>' +
+    '<div class="card" style="display:flex;flex-direction:column;gap:8px"><label for="name" class="eyebrow">Your name</label>' +
+    '<input type="text" id="name" maxlength="24" autocomplete="off" value="' + esc(name) + '"></div>' +
+    cards +
+    '<div class="submitbar">' + (S.note ? '<p class="card" style="margin:0;padding:10px 14px">' + esc(S.note) + '</p>' : '') +
+    '<button class="btn" id="submit"' + (n ? '' : ' disabled') + '>' + (st.mine && !S.dirty ? 'Ballot in. Change it and tap again to update' : (st.mine ? 'Update my ballot' : 'Submit my ballot')) + ' (' + n + ' scored)</button></div>';
+}
+
+function resultsView(st) {
+  var list = st.results.slice();
+  var fresh = st.revealed > S.lastRevealed;
+  S.lastRevealed = st.revealed;
+  var rows = list.map(function (r, i) {
+    var cls = 'card res' + (r.rank === 1 ? ' win' : '') + (fresh && i === 0 ? ' fresh' : '');
+    var meta = r.n ? 'Average ' + r.avg.toFixed(1) + ' from ' + r.n + (r.n === 1 ? ' reader' : ' readers') : 'Nobody scored it';
+    return '<div class="' + cls + '"><span class="rk">' + r.rank + '</span><div><div style="font-weight:600">' + esc(r.title) + '</div><div class="meta">' + esc(r.author) + ' &middot; ' + meta + '</div></div><span class="sc">' + (r.n ? r.adj.toFixed(1) : '-') + '</span></div>';
+  }).join("");
+  var done = st.revealed >= st.total;
+  return '<p class="eyebrow">' + (done ? 'Final results' : 'Revealed ' + st.revealed + ' of ' + st.total + ', from last place up') + '</p>' + rows +
+    '<p class="muted" style="font-size:0.85rem">Big number: the average, nudged toward the group average (' + st.mean.toFixed(1) + ') by ' + st.prior + ' imaginary votes. ' + st.voters + ' ballots.</p>';
+}
+
+function pinView() {
+  return '<div class="card" style="display:flex;flex-direction:column;gap:12px"><h2>Quizmaster</h2><label class="muted" for="pin">Quizmaster PIN</label>' +
+    '<input type="password" id="pin" inputmode="numeric" autocomplete="off"><button class="btn" id="pinbtn">Open the controls</button>' +
+    '<button class="link" id="backbtn">Back to the ballot</button></div>';
+}
+
+var CONFIRM = ["close", "reset"];
+function hbtn(action, label, armed, kind) {
+  if (CONFIRM.indexOf(action) >= 0 && S.confirm === action) return '<button class="btn warn" data-host="' + action + '">' + armed + '</button>';
+  return '<button class="btn ' + (kind || "") + '" data-host="' + action + '">' + label + '</button>';
+}
+function hostBar(st) {
+  var b = [];
+  if (st.phase === "open") b.push(hbtn("close", "Close voting", "Tap again to close"));
+  if (st.phase === "closed" && st.revealed < st.total) b.push(hbtn("reveal", st.revealed ? "Reveal #" + (st.total - st.revealed) : "Reveal last place"));
+  if (st.phase === "closed") b.push(hbtn("reopen", "Reopen voting", "", "ghost"));
+  b.push(hbtn("reset", "Clear all ballots", "Tap again: wipe every ballot", "ghost"));
+  var names = (st.names || []).map(esc).join(", ");
+  return '<div class="hostbar"><div class="row"><span class="eyebrow">Quizmaster</span><span class="muted" style="font-size:0.85rem">' + st.voters + ' ballots' + (names ? ': ' + names : '') + '</span>' +
+    '<button class="link" id="leavehost" style="margin-left:auto">Leave</button></div><div class="row">' + b.join("") + '</div></div>';
+}
+
+function wire() {
+  document.querySelectorAll("[data-b]").forEach(function (b) {
+    b.onclick = function () {
+      var book = S.st.books[Number(b.dataset.b)], v = Number(b.dataset.v);
+      if (!S.scores) S.scores = {};
+      if (v) S.scores[book.title] = v; else delete S.scores[book.title];
+      S.dirty = true; S.note = ""; render(true);
+    };
+  });
+  var nm = $("name"); if (nm) nm.oninput = function () { S.dirty = true; S.name = nm.value; };
+  var sb = $("submit");
+  if (sb) sb.onclick = function () {
+    var name = $("name").value.trim();
+    if (!name) { S.err = "Type your name first."; paintErr(); $("name").focus(); return; }
+    ls("name", name);
+    sb.disabled = true; sb.textContent = "Sending...";
+    run("castVote", [S.vid, name, S.scores], function (r) {
+      S.dirty = false; S.err = ""; S.note = "Ballot in: " + r.count + " books scored. You can change it until voting closes.";
+      S.busy = false; poll();
+    }, function () { sb.disabled = false; render(true); });
+  };
+  var hl = $("hostlink"); if (hl) hl.onclick = function () { S.hostAsk = true; render(true); };
+  var bb = $("backbtn"); if (bb) bb.onclick = function () { S.hostAsk = false; render(true); };
+  var pb = $("pinbtn");
+  if (pb) pb.onclick = function () {
+    var pin = $("pin").value.trim();
+    run("voteState", [S.vid, pin], function (st) {
+      if (!st.host) { S.err = "That PIN doesn't match."; paintErr(); return; }
+      S.pin = pin; ls("pin", pin); S.hostAsk = false; S.err = ""; S.st = st; render(true);
+    });
+  };
+  var lh = $("leavehost"); if (lh) lh.onclick = function () { S.pin = ""; ls("pin", null); S.st.host = false; render(true); poll(); };
+  document.querySelectorAll("[data-host]").forEach(function (b) {
+    b.onclick = function () {
+      var action = b.dataset.host;
+      if (CONFIRM.indexOf(action) >= 0 && S.confirm !== action) {
+        S.confirm = action; render(true);
+        setTimeout(function () { if (S.confirm === action) { S.confirm = ""; render(true); } }, 4000);
+        return;
+      }
+      S.confirm = ""; b.disabled = true;
+      run("voteHost", [S.pin, action], function (st) { S.err = ""; S.st = st; if (action === "reset") { S.scores = {}; S.dirty = false; S.note = ""; } render(true); }, function () { b.disabled = false; });
+    };
+  });
+}
+
+// ---------- a little snow, same as the quiz ----------
+(function () {
+  if (window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  var c = $("snow"), x = c.getContext("2d"), flakes = [];
+  function size() { c.width = innerWidth; c.height = innerHeight; }
+  size(); addEventListener("resize", size);
+  for (var i = 0; i < 40; i++) flakes.push({ x: Math.random(), y: Math.random(), r: 1 + Math.random() * 2, s: 0.0006 + Math.random() * 0.0012 });
+  (function loop() {
+    x.clearRect(0, 0, c.width, c.height); x.fillStyle = "rgba(233,236,239,0.7)";
+    flakes.forEach(function (f) { f.y += f.s; f.x += Math.sin(f.y * 20) * 0.0004; if (f.y > 1) { f.y = 0; f.x = Math.random(); } x.beginPath(); x.arc(f.x * c.width, f.y * c.height, f.r, 0, 6.3); x.fill(); });
+    requestAnimationFrame(loop);
+  })();
+})();
+</script>
+</body>
+</html>
