@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Burrito Book Club Quiz</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🌯</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Inter:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<canvas class="snow" id="snow" aria-hidden="true"></canvas>
+<main class="wrap" id="app"><p class="muted">Loading the quiz...</p></main>
+<div class="dock" id="dock" hidden>
+  <div class="inner">
+    <div class="msgs" id="msgs" aria-live="polite"></div>
+    <div class="reacts" id="reacts"></div>
+    <form class="sendrow" id="sendform">
+      <input type="text" id="chatin" maxlength="120" placeholder="Say something..." autocomplete="off">
+      <button class="btn" type="submit">Send</button>
+    </form>
+  </div>
+</div>
+<script>
+var AVATARS = ["🌯","🎄","⛄","🦌","🎁","📚","🌶️","🥑","🧀","🍪"];
+var REACTS = ["😂","🔥","🌯","🎄","👏","😱"];
+var TAGS = { A: "Salsa", B: "Guac", C: "Queso", D: "Frijoles" };
+
+function ls(k, v) {
+  try { if (v === undefined) return localStorage.getItem("bbq_" + k); if (v === null) localStorage.removeItem("bbq_" + k); else localStorage.setItem("bbq_" + k, v); } catch (e) { return null; }
+}
+var S = { pid: ls("pid") || "", pin: ls("pin") || "", since: 0, busy: false, offset: 0, st: null, key: "", avatar: ls("avatar") || AVATARS[0], hostAsk: false, confirm: "", err: "" };
+
+function esc(t) { return String(t == null ? "" : t).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
+function $(id) { return document.getElementById(id); }
+// The Apps Script backend. A plain-text POST avoids a CORS preflight.
+var API_URL = "https://script.google.com/macros/s/AKfycbx_yZWmk_b-MYy_9-gptHiBzdnW2i3_2SqgBEyI2tNvngBYoPy-eTIE7tdmWvzJ1uF0cQ/exec";
+function call(fn, args) {
+  var ctl = window.AbortController ? new AbortController() : null;
+  var t = ctl ? setTimeout(function () { ctl.abort(); }, 15000) : 0;
+  return fetch(API_URL, { method: "POST", body: JSON.stringify({ fn: fn, args: args }), signal: ctl ? ctl.signal : undefined })
+    .then(function (r) { clearTimeout(t); if (!r.ok) throw new Error("Connection problem (" + r.status + "), try again."); return r.json(); })
+    .then(function (d) { if (!d.ok) throw new Error(d.e); return d.r; }, function (e) { clearTimeout(t); throw e; });
+}
+function run(fn, args, ok, fail) {
+  call(fn, args).then(ok || function () {}, function (e) {
+    var m = (e && e.message) ? e.message : String(e);
+    if (/fetch|load failed|network|abort/i.test(m)) m = "Connection hiccup, try again.";
+    S.err = m; paintErr(); if (fail) fail(e);
+  });
+}
+function paintErr() { var el = $("err"); if (el) el.textContent = S.err; }
+
+// ---------- polling ----------
+function poll() {
+  if (S.busy) return;
+  S.busy = true;
+  var t0 = Date.now();
+  call("getState", [S.pid, S.since, S.pin]).then(function (st) {
+    S.busy = false;
+    S.offset = st.now - (t0 + Date.now()) / 2;
+    if (st.chat && st.chat.length) addChat(st.chat);
+    S.st = st;
+    render();
+  }, function () { S.busy = false; });
+}
+setInterval(poll, 1500);
+poll();
+
+function serverNow() { return Date.now() + S.offset; }
+
+// ---------- render ----------
+function render() {
+  var st = S.st; if (!st) return;
+  var hosting = st.host;
+  if (S.pin && !st.host) { S.pin = ""; ls("pin", null); }
+  var joined = !!st.me;
+  $("dock").hidden = !(joined || hosting);
+  var key = JSON.stringify([st.phase, st.q, st.game, joined, hosting, S.hostAsk, S.confirm, st.myAnswer, st.reveal && st.reveal.counts, st.players, st.board, st.answered, st.playerCount, st.total, st.upNext, st.skipped]);
+  if (key === S.key) return;
+  // don't rebuild under someone typing their name or PIN
+  var a = document.activeElement;
+  if (a && a.tagName === "INPUT" && a.id !== "chatin" && document.getElementById("app").contains(a) && st.phase === (S.lastPhase || st.phase) && !joined && !st.host) return;
+  S.key = key; S.lastPhase = st.phase;
+  var html = "";
+  if (hosting) html += hostBar(st);
+  if (!joined && !hosting) html += joinView(st);
+  else html += phaseView(st, hosting);
+  html += '<p class="err" id="err" role="alert"></p>';
+  $("app").innerHTML = html;
+  paintErr();
+  wire();
+  tick();
+}
+
+function header(st) {
+  return '<div class="title-block"><span class="ribbon">Christmas Special</span><h1>' + esc(st.title) + '</h1></div>';
+}
+
+function joinView(st) {
+  if (S.hostAsk) {
+    return header(st) + '<div class="card" style="display:flex;flex-direction:column;gap:12px">' +
+      '<h2>Quizmaster</h2><label class="muted" for="pin">Quizmaster PIN</label>' +
+      '<input type="password" id="pin" inputmode="numeric" autocomplete="off">' +
+      '<button class="btn" id="pinbtn">Open the controls</button>' +
+      '<button class="link" id="backbtn">Back to joining as a player</button></div>';
+  }
+  var av = AVATARS.map(function (a) { return '<button type="button" aria-pressed="' + (a === S.avatar) + '" data-av="' + a + '">' + a + '</button>'; }).join("");
+  return header(st) +
+    '<p class="muted">Answer on your phone, fastest right answers score most. Heckling encouraged in the chat.</p>' +
+    '<div class="card" style="display:flex;flex-direction:column;gap:12px">' +
+    '<label for="name" class="eyebrow">Your name</label>' +
+    '<input type="text" id="name" maxlength="24" autocomplete="off" value="' + esc(ls("name") || "") + '">' +
+    '<span class="eyebrow">Pick your filling</span><div class="avatars">' + av + '</div>' +
+    '<button class="btn" id="joinbtn">Join the quiz</button></div>' +
+    '<p class="muted" style="font-size:0.9rem">' + st.playerCount + ' in so far.</p>' +
+    '<button class="link" id="hostlink">I\'m the quizmaster</button>';
+}
+
+function phaseView(st, hosting) {
+  var me = st.me ? '<span class="chip me">' + esc(st.me.avatar) + ' ' + esc(st.me.name) + '</span>' : '';
+  if (st.phase === "lobby") {
+    var chips = (st.players || []).map(function (p) { return '<span class="chip">' + esc(p.avatar) + ' ' + esc(p.name) + '</span>'; }).join("");
+    return header(st) +
+      '<div class="card"><p class="eyebrow">In the room (' + st.playerCount + ')</p><div class="chips" style="margin-top:10px">' + (chips || '<span class="muted">Nobody yet.</span>') + '</div></div>' +
+      '<p class="muted">' + (hosting ? st.total + ' questions loaded from the Sheet. Start when everyone is in.' : 'You\'re in. The quizmaster starts the first question soon.') + '</p>';
+  }
+  if (st.phase === "question" || st.phase === "reveal") return questionView(st, hosting, me);
+  if (st.phase === "leaderboard") {
+    return '<p class="eyebrow">After question ' + (st.q + 1) + ' of ' + st.total + '</p><h2>Leaderboard</h2>' + boardList(st.board, 99, hosting);
+  }
+  if (st.phase === "end") {
+    var b = st.board || [];
+    function step(p, cls, n) { return p ? '<div class="step ' + cls + '"><div class="av">' + esc(p.avatar) + '</div><div class="nm">' + esc(p.name) + '</div><div>' + p.pts + '</div><div class="eyebrow">' + n + '</div></div>' : '<div></div>'; }
+    return header(st) + '<h2>Final scores</h2><p class="muted" style="margin:0">Total points: right answers, plus any quizmaster bonus.</p><div class="podium">' + step(b[1], "p2", "2nd") + step(b[0], "p1", "1st") + step(b[2], "p3", "3rd") + '</div>' + boardList(b, 99) +
+      '<p class="muted">Scores are saved in the Results tab.</p>';
+  }
+  return '';
+}
+
+function questionView(st, hosting, me) {
+  var q = st.question, rev = st.phase === "reveal" ? st.reveal : null, mine = st.myAnswer;
+  var opts = q.options.map(function (o) {
+    var cls = "opt " + o.key;
+    if (mine && mine.c === o.key) cls += " picked";
+    if (rev) cls += (o.key === rev.correct ? " right" : " dim");
+    else if (mine && mine.c !== o.key) cls += " dim";
+    if (hosting && !rev && st.hostCorrect === o.key) cls += " right";
+    var count = rev ? '<span class="count">' + (rev.counts[o.key] || 0) + '</span>' : '';
+    var dis = (rev || mine || !st.me) ? ' disabled' : '';
+    return '<button class="' + cls + '" data-opt="' + o.key + '"' + dis + '><span class="key">' + o.key + '</span><span class="txt"><span class="tag">' + TAGS[o.key] + '</span><br>' + esc(o.text) + '</span>' + count + '</button>';
+  }).join("");
+  var top = '<div class="qhead"><span class="eyebrow">' + (q.round ? esc(q.round) + ' &middot; ' : '') + 'Question ' + (st.q + 1) + ' of ' + st.total + '</span>' + (rev ? '' : '<span class="secs" id="secs"></span>') + '</div>' +
+    (rev ? '' : '<div class="timer" id="timer"><i></i></div>') +
+    '<h2>' + esc(q.text) + '</h2>';
+  var foot = '';
+  if (!rev) {
+    foot = '<p class="muted" id="status">' + (mine ? (mine.c === "SKIP" ? 'Skipped. ' : 'Locked in. ') : '') + st.answered + ' of ' + st.playerCount + ' in.</p>';
+  } else {
+    var res;
+    if (!st.me) res = '<div class="card result"><div class="big">' + (rev.counts[rev.correct] || 0) + ' got it</div></div>';
+    else if (mine && mine.c === "SKIP") res = '<div class="card result"><div class="big">Skipped</div><p class="muted">No points this time.</p></div>';
+    else if (!mine) res = '<div class="card result"><div class="big">Too slow</div><p class="muted">No answer this time.</p></div>';
+    else if (mine.ok) res = '<div class="card result"><div class="big">+' + mine.pts + '</div><p class="muted">Right, in ' + (mine.ms / 1000).toFixed(1) + ' s.</p></div>';
+    else res = '<div class="card result"><div class="big">Not this one</div><p class="muted">0 points. It was ' + rev.correct + '.</p></div>';
+    foot = res + (rev.after ? '<p class="after">' + esc(rev.after) + '</p>' : '') + '<p class="eyebrow">Top 5</p>' + boardList(st.board, 5);
+  }
+  var skipBtn = (!rev && st.me) ? '<button class="btn ghost skip" data-opt="SKIP"' + (mine ? ' disabled' : '') + '>' + (mine && mine.c === "SKIP" ? 'Skipped' : 'Didn\'t read it, skip') + '</button>' : '';
+  return top + '<div class="options">' + opts + '</div>' + skipBtn + foot;
+}
+
+function boardList(b, n, bonusMode) {
+  b = b || [];
+  var rows = b.slice(0, n).map(function (p, i) {
+    var bonus = (bonusMode && p.id) ? '<div class="bonus">' + [-100, 100, 250, 500].map(function (d) {
+      return '<button type="button" data-bonus="' + d + '" data-id="' + esc(p.id) + '">' + (d > 0 ? '+' : '&minus;') + Math.abs(d) + '</button>';
+    }).join("") + (p.bonus ? '<span class="muted">bonus ' + (p.bonus > 0 ? '+' : '') + p.bonus + '</span>' : '') + '</div>' : '';
+    return '<li class="' + (p.me ? 'me' : '') + '"><span class="rank">' + (i + 1) + '</span><span>' + esc(p.avatar) + '</span><span class="nm">' + esc(p.name) + '</span><span class="pt">' + p.pts + '</span>' + bonus + '</li>';
+  });
+  var meIdx = b.findIndex(function (p) { return p.me; });
+  if (meIdx >= n) rows.push('<li class="me"><span class="rank">' + (meIdx + 1) + '</span><span>' + esc(b[meIdx].avatar) + '</span><span class="nm">' + esc(b[meIdx].name) + '</span><span class="pt">' + b[meIdx].pts + '</span></li>');
+  return '<ol class="board">' + (rows.join("") || '<li><span></span><span></span><span class="muted">No scores yet</span><span></span></li>') + '</ol>';
+}
+
+function hostBar(st) {
+  var b = [], tools = [];
+  var last = !st.upNext;
+  var live = st.phase === "question" || st.phase === "reveal";
+  if (st.phase === "lobby") b.push(btn("next", "Start the quiz", st.upNext ? "" : "disabled"));
+  if (st.phase === "question") b.push(btn("reveal", "Reveal now"));
+  if (st.phase === "reveal") { b.push(btn("board", "Leaderboard", "", "ghost")); b.push(btn("next", last ? "Final scores" : "Next question")); }
+  if (st.phase === "leaderboard") b.push(btn("next", last ? "Final scores" : "Next question"));
+  if (st.phase !== "end" && st.phase !== "lobby") b.push(cbtn("end", "End game"));
+  if (st.phase === "end") b.push(btn("new", "New game, same players"));
+  b.push(cbtn("wipe", "Clear players", "Tap again: everyone rejoins"));
+  if (live) { tools.push(cbtn("redo", "Redo question")); tools.push(cbtn("skipnow", "Skip this question")); tools.push(cbtn("skiprest", "Skip rest of round")); }
+  var next = '';
+  if (st.upNext && st.phase !== "end") {
+    next = '<div class="upnext"><span class="eyebrow">Up next &middot; Q' + st.upNext.n + (st.upNext.round ? ' &middot; ' + esc(st.upNext.round) : '') + '</span><span class="t">' + esc(st.upNext.text) + '</span></div>' +
+      cbtn("skipnext", "Skip it") + cbtn("skipround", "Skip that round");
+  }
+  return '<div class="hostbar"><div class="row"><span class="eyebrow">Quizmaster</span><span class="muted" style="font-size:0.85rem">' + st.playerCount + ' players &middot; ' + st.total + ' questions' + (st.skipped ? ' &middot; ' + st.skipped + ' skipped' : '') + '</span>' +
+    '<button class="link" id="leavehost" style="margin-left:auto">Leave</button></div><div class="row">' + b.join("") + '</div>' +
+    (tools.length ? '<div class="row">' + tools.join("") + '</div>' : '') +
+    (next ? '<div class="row">' + next + '</div>' : '') + '</div>';
+}
+// Buttons that change scores or skip ahead need a second tap within 4 seconds.
+var CONFIRM = ["end", "wipe", "redo", "skipnow", "skiprest", "skipnext", "skipround"];
+function cbtn(action, label, armed) {
+  return S.confirm === action ? btn(action, armed || "Tap again: " + label.toLowerCase(), "", "warn") : btn(action, label, "", "ghost");
+}
+function btn(action, label, attr, kind) { return '<button class="btn ' + (kind || "") + '" data-host="' + action + '" ' + (attr || "") + '>' + label + '</button>'; }
+
+// ---------- events ----------
+function wire() {
+  document.querySelectorAll("[data-av]").forEach(function (b) {
+    b.onclick = function () { S.avatar = b.dataset.av; ls("avatar", S.avatar); document.querySelectorAll("[data-av]").forEach(function (x) { x.setAttribute("aria-pressed", x === b); }); };
+  });
+  var jb = $("joinbtn");
+  if (jb) jb.onclick = function () {
+    var name = $("name").value.trim();
+    if (!name) { S.err = "Type a name first."; paintErr(); return; }
+    jb.disabled = true; jb.textContent = "Joining...";
+    ls("name", name);
+    run("join", [name, S.avatar, S.pid], function (pid) { S.pid = pid; ls("pid", pid); S.err = ""; S.key = ""; poll(); }, function () { jb.disabled = false; jb.textContent = "Join the quiz"; });
+  };
+  var hl = $("hostlink"); if (hl) hl.onclick = function () { S.hostAsk = true; S.key = ""; render(); };
+  var bb = $("backbtn"); if (bb) bb.onclick = function () { S.hostAsk = false; S.key = ""; render(); };
+  var pb = $("pinbtn");
+  if (pb) pb.onclick = function () {
+    var pin = $("pin").value.trim();
+    run("getState", ["", 0, pin], function (st) {
+      if (!st.host) { S.err = "That PIN doesn't match. It's HOST_PIN at the top of Code.gs."; paintErr(); return; }
+      S.pin = pin; ls("pin", pin); S.hostAsk = false; S.err = ""; S.st = st; S.key = ""; render();
+    });
+  };
+  var lh = $("leavehost"); if (lh) lh.onclick = function () { S.pin = ""; ls("pin", null); S.key = ""; poll(); };
+  document.querySelectorAll("[data-opt]").forEach(function (b) {
+    b.onclick = function () {
+      if (b.disabled) return;
+      var choice = b.dataset.opt, qi = S.st.q;
+      document.querySelectorAll("[data-opt]").forEach(function (x) { x.disabled = true; if (x !== b && choice !== "SKIP") x.classList.add("dim"); });
+      b.classList.add("picked");
+      run("answer", [S.pid, qi, choice], function () { S.err = ""; poll(); }, function () { S.key = ""; poll(); });
+    };
+  });
+  document.querySelectorAll("[data-host]").forEach(function (b) {
+    b.onclick = function () {
+      var action = b.dataset.host;
+      if (CONFIRM.indexOf(action) >= 0 && S.confirm !== action) { S.confirm = action; S.key = ""; render(); setTimeout(function () { if (S.confirm === action) { S.confirm = ""; S.key = ""; render(); } }, 4000); return; }
+      S.confirm = ""; b.disabled = true;
+      run("hostAction", [S.pin, action], function (st) { S.err = ""; S.st = st; S.key = ""; render(); }, function () { b.disabled = false; });
+    };
+  });
+  document.querySelectorAll("[data-bonus]").forEach(function (b) {
+    b.onclick = function () {
+      b.disabled = true;
+      run("hostAction", [S.pin, "bonus", { id: b.dataset.id, d: Number(b.dataset.bonus) }], function (st) { S.err = ""; S.st = st; S.key = ""; render(); }, function () { b.disabled = false; });
+    };
+  });
+}
+
+// ---------- timer ----------
+function tick() {
+  var st = S.st;
+  var el = $("timer"), secs = $("secs");
+  if (st && st.phase === "question" && el) {
+    var q = st.question, now = serverNow();
+    var total = q.seconds * 1000, left = q.endsAt - now;
+    var startIn = q.endsAt - total - now;
+    if (startIn > 0) { secs.textContent = "Ready"; el.firstChild.style.transform = "scaleX(1)"; }
+    else {
+      var f = Math.max(0, Math.min(1, left / total));
+      el.firstChild.style.transform = "scaleX(" + f + ")";
+      el.classList.toggle("low", left < 5000);
+      secs.textContent = Math.max(0, Math.ceil(left / 1000));
+      if (left <= 0) poll();
+    }
+  }
+}
+setInterval(tick, 200);
+
+// ---------- chat ----------
+var seenFloat = {};
+function addChat(list) {
+  var box = $("msgs");
+  var atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 10;
+  list.forEach(function (m) {
+    if (m.i <= S.since) return;
+    S.since = m.i;
+    var d = document.createElement("div");
+    d.className = "msg";
+    var b = document.createElement("b"); b.textContent = m.a + " " + m.n + ": ";
+    d.appendChild(b); d.appendChild(document.createTextNode(m.t));
+    box.appendChild(d);
+    if (REACTS.indexOf(m.t) >= 0 && !seenFloat[m.i] && S.started) floatEmoji(m.t);
+    seenFloat[m.i] = 1;
+  });
+  while (box.children.length > 60) box.removeChild(box.firstChild);
+  if (atBottom || !S.started) box.scrollTop = box.scrollHeight;
+  S.started = true;
+}
+function floatEmoji(e) {
+  var f = document.createElement("div"); f.className = "float"; f.textContent = e;
+  f.style.left = (10 + Math.random() * 75) + "%";
+  document.body.appendChild(f); setTimeout(function () { f.remove(); }, 2300);
+}
+function sendChat(text) {
+  if (!text) return;
+  run("chat", [S.pid, text, S.pin], function () { poll(); });
+}
+$("reacts").innerHTML = REACTS.map(function (r) { return '<button type="button" data-r="' + r + '" aria-label="React ' + r + '">' + r + '</button>'; }).join("");
+document.querySelectorAll("[data-r]").forEach(function (b) { b.onclick = function () { sendChat(b.dataset.r); }; });
+$("sendform").addEventListener("submit", function (e) { e.preventDefault(); var i = $("chatin"); sendChat(i.value.trim()); i.value = ""; });
+$("msgs").onclick = function () { $("dock").classList.toggle("open"); };
+
+// ---------- a little snow ----------
+(function () {
+  if (window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  var c = $("snow"), x = c.getContext("2d"), flakes = [];
+  function size() { c.width = innerWidth; c.height = innerHeight; }
+  size(); addEventListener("resize", size);
+  for (var i = 0; i < 40; i++) flakes.push({ x: Math.random(), y: Math.random(), r: 1 + Math.random() * 2, s: 0.0006 + Math.random() * 0.0012 });
+  (function loop() {
+    x.clearRect(0, 0, c.width, c.height); x.fillStyle = "rgba(233,236,239,0.7)";
+    flakes.forEach(function (f) { f.y += f.s; f.x += Math.sin(f.y * 20) * 0.0004; if (f.y > 1) { f.y = 0; f.x = Math.random(); } x.beginPath(); x.arc(f.x * c.width, f.y * c.height, f.r, 0, 6.3); x.fill(); });
+    requestAnimationFrame(loop);
+  })();
+})();
+</script>
+</body>
+</html>
