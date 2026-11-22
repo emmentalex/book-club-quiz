@@ -122,6 +122,10 @@ function phaseView(st, hosting) {
       '<p class="muted">' + (hosting ? st.total + ' questions loaded from the Sheet. Start when everyone is in.' : 'You\'re in. The quizmaster starts the first question soon.') + '</p>';
   }
   if (st.phase === "question" || st.phase === "reveal") return questionView(st, hosting, me);
+  if (st.phase === "pause") {
+    return header(st) + '<div class="card result"><div class="big">Short pause</div><p class="muted">' +
+      (hosting ? 'Skipped. Tap Next question when you\'re ready.' : 'The quizmaster will start the next question soon.') + '</p></div>';
+  }
   if (st.phase === "leaderboard") {
     return '<p class="eyebrow">After question ' + (st.q + 1) + ' of ' + st.total + '</p><h2>Leaderboard</h2>' + boardList(st.board, 99, hosting);
   }
@@ -185,7 +189,7 @@ function hostBar(st) {
   if (st.phase === "lobby") b.push(btn("next", "Start the quiz", st.upNext ? "" : "disabled"));
   if (st.phase === "question") b.push(btn("reveal", "Reveal now"));
   if (st.phase === "reveal") { b.push(btn("board", "Leaderboard", "", "ghost")); b.push(btn("next", last ? "Final scores" : "Next question")); }
-  if (st.phase === "leaderboard") b.push(btn("next", last ? "Final scores" : "Next question"));
+  if (st.phase === "leaderboard" || st.phase === "pause") b.push(btn("next", last ? "Final scores" : "Next question"));
   if (st.phase !== "end" && st.phase !== "lobby") b.push(cbtn("end", "End game"));
   if (st.phase === "end") b.push(btn("new", "New game, same players"));
   b.push(cbtn("wipe", "Clear players", "Tap again: everyone rejoins"));
