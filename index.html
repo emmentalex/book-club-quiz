@@ -13,14 +13,7 @@
 <canvas class="snow" id="snow" aria-hidden="true"></canvas>
 <main class="wrap" id="app"><p class="muted">Loading the quiz...</p></main>
 <div class="dock" id="dock" hidden>
-  <div class="inner">
-    <div class="msgs" id="msgs" aria-live="polite"></div>
-    <div class="reacts" id="reacts"></div>
-    <form class="sendrow" id="sendform">
-      <input type="text" id="chatin" maxlength="120" placeholder="Say something..." autocomplete="off">
-      <button class="btn" type="submit">Send</button>
-    </form>
-  </div>
+  <div class="reacts" id="reacts"></div>
 </div>
 <script>
 var AVATARS = ["🌯","🎄","⛄","🦌","🎁","📚","🌶️","🥑","🧀","🍪"];
@@ -83,7 +76,7 @@ function render() {
   if (key === S.key) return;
   // don't rebuild under someone typing their name or PIN
   var a = document.activeElement;
-  if (a && a.tagName === "INPUT" && a.id !== "chatin" && document.getElementById("app").contains(a) && st.phase === (S.lastPhase || st.phase) && !joined && !st.host) return;
+  if (a && a.tagName === "INPUT" && document.getElementById("app").contains(a) && st.phase === (S.lastPhase || st.phase) && !joined && !st.host) return;
   S.key = key; S.lastPhase = st.phase;
   var html = "";
   if (hosting) html += hostBar(st);
@@ -110,7 +103,7 @@ function joinView(st) {
   }
   var av = AVATARS.map(function (a) { return '<button type="button" aria-pressed="' + (a === S.avatar) + '" data-av="' + a + '">' + a + '</button>'; }).join("");
   return header(st) +
-    '<p class="muted">Answer on your phone, fastest right answers score most. Heckling encouraged in the chat.</p>' +
+    '<p class="muted">Answer on your phone, fastest right answers score most. Tap the emoji at the bottom to react.</p>' +
     '<div class="card" style="display:flex;flex-direction:column;gap:12px">' +
     '<label for="name" class="eyebrow">Your name</label>' +
     '<input type="text" id="name" maxlength="24" autocomplete="off" value="' + esc(ls("name") || "") + '">' +
@@ -283,24 +276,19 @@ function tick() {
 }
 setInterval(tick, 200);
 
-// ---------- chat ----------
-var seenFloat = {};
+// ---------- reactions ----------
+// Reactions travel through the server's chat log and float up everyone's
+// screen. Your own float at once; the server copy is then not floated again.
+var mine = {};
 function addChat(list) {
-  var box = $("msgs");
-  var atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 10;
+  var meName = S.st && S.st.host ? "Quizmaster" : (S.st && S.st.me ? S.st.me.name : "");
   list.forEach(function (m) {
     if (m.i <= S.since) return;
     S.since = m.i;
-    var d = document.createElement("div");
-    d.className = "msg";
-    var b = document.createElement("b"); b.textContent = m.a + " " + m.n + ": ";
-    d.appendChild(b); d.appendChild(document.createTextNode(m.t));
-    box.appendChild(d);
-    if (REACTS.indexOf(m.t) >= 0 && !seenFloat[m.i] && S.started) floatEmoji(m.t);
-    seenFloat[m.i] = 1;
+    if (REACTS.indexOf(m.t) < 0 || !S.started) return;
+    if (m.n === meName && mine[m.t] > 0) { mine[m.t]--; return; }
+    floatEmoji(m.t);
   });
-  while (box.children.length > 60) box.removeChild(box.firstChild);
-  if (atBottom || !S.started) box.scrollTop = box.scrollHeight;
   S.started = true;
 }
 function floatEmoji(e) {
@@ -308,14 +296,13 @@ function floatEmoji(e) {
   f.style.left = (10 + Math.random() * 75) + "%";
   document.body.appendChild(f); setTimeout(function () { f.remove(); }, 2300);
 }
-function sendChat(text) {
-  if (!text) return;
-  run("chat", [S.pid, text, S.pin], function () { poll(); });
+function react(e) {
+  floatEmoji(e);
+  mine[e] = (mine[e] || 0) + 1;
+  run("chat", [S.pid, e, S.pin], null, function () { mine[e] = Math.max(0, mine[e] - 1); });
 }
 $("reacts").innerHTML = REACTS.map(function (r) { return '<button type="button" data-r="' + r + '" aria-label="React ' + r + '">' + r + '</button>'; }).join("");
-document.querySelectorAll("[data-r]").forEach(function (b) { b.onclick = function () { sendChat(b.dataset.r); }; });
-$("sendform").addEventListener("submit", function (e) { e.preventDefault(); var i = $("chatin"); sendChat(i.value.trim()); i.value = ""; });
-$("msgs").onclick = function () { $("dock").classList.toggle("open"); };
+document.querySelectorAll("[data-r]").forEach(function (b) { b.onclick = function () { react(b.dataset.r); }; });
 
 // ---------- a little snow ----------
 (function () {
